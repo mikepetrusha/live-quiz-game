@@ -32,9 +32,6 @@ const broadcast = (wsList: WebSocket[], type: string, data: unknown): void => {
   }
 };
 
-let userIdCounter = 1;
-let gameIdCounter = 1;
-
 const generateCode = (): string => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let code = "";
@@ -74,6 +71,7 @@ const broadcastToGame = (game: Game, type: string, data: unknown): void => {
   broadcast(getGameParticipants(game), type, data);
 };
 
+let userIdCounter = 1;
 const handleLogin = (ws: WebSocket, data: RegData): void => {
   const { name, password } = data;
 
@@ -107,6 +105,7 @@ const handleLogin = (ws: WebSocket, data: RegData): void => {
   send(ws, "reg", { name, index, error: false, errorText: "" });
 };
 
+let gameIdCounter = 1;
 const handleCreateGame = (ws: WebSocket, data: CreateGameData): void => {
   const userId = userData.get(ws);
   if (!userId) {
@@ -135,33 +134,52 @@ const handleCreateGame = (ws: WebSocket, data: CreateGameData): void => {
 
 const handleJoinGame = (ws: WebSocket, data: JoinGameData): void => {
   const userId = userData.get(ws);
-  const user = users.get(userId!);
+  if (!userId) {
+    send(ws, "error", { message: "Player is not registered" });
+    return;
+  }
+
+  const user = users.get(userId);
+  if (!user) {
+    send(ws, "error", { message: "User not found" });
+    return;
+  }
+
   const game = [...games.values()].find(
     (g) => g.code === data.code.toUpperCase(),
   );
+  if (!game) {
+    send(ws, "error", { message: "Game is not found" });
+    return;
+  }
 
-  const alreadyIn = game?.players.find((p) => p.index === userId);
+  if (game.status !== "waiting") {
+    send(ws, "error", { message: "Game has already started" });
+    return;
+  }
+
+  const alreadyIn = game.players.find((p) => p.index === userId);
   if (!alreadyIn) {
-    const player: Player = { name: user!.name, index: userId!, score: 0, ws };
-    game!.players.push(player);
+    const player: Player = { name: user.name, index: userId, score: 0, ws };
+    game.players.push(player);
   } else {
     alreadyIn.ws = ws;
   }
 
-  send(ws, "game_joined", { gameId: game!.id });
+  send(ws, "game_joined", { gameId: game.id });
 
-  const playerData = game!.players.map((p) => ({
+  const playerData = game.players.map((p) => ({
     name: p.name,
     index: p.index,
     score: p.score,
   }));
 
-  broadcastToGame(game!, "player_joined", {
-    playerName: user!.name,
-    playerCount: game!.players.length,
+  broadcastToGame(game, "player_joined", {
+    playerName: user.name,
+    playerCount: game.players.length,
   });
 
-  broadcastToGame(game!, "update_players", playerData);
+  broadcastToGame(game, "update_players", playerData);
 };
 
 const sendQuestion = (game: Game): void => {
@@ -178,10 +196,10 @@ const sendQuestion = (game: Game): void => {
 
   game.questionStartTime = Date.now();
   game.playerAnswers = new Map();
-  for (const p of game.players) {
-    p.hasAnswered = false;
-    p.answerTime = undefined;
-    p.answeredCorrectly = undefined;
+  for (const player of game.players) {
+    player.hasAnswered = false;
+    player.answerTime = undefined;
+    player.answeredCorrectly = undefined;
   }
 
   game.questionTimer = setTimeout(() => {
@@ -247,40 +265,72 @@ const finishQuestion = (game: Game): void => {
 };
 
 const handleStartGame = (ws: WebSocket, data: StartGameData): void => {
-  const userId = userData.get(ws);
-
   const game = games.get(data.gameId);
+  const userId = userData.get(ws);
+  if (!userId) {
+    send(ws, "error", { message: "Player is not registered" });
+    return;
+  }
   if (!game) {
-    send(ws, "error", { message: "Game not found" });
+    send(ws, "error", { message: "Game is not found" });
+    return;
+  }
+  if (game.hostId !== userId) {
+    send(ws, "error", { message: "Only the host can start the game" });
+    return;
+  }
+  if (game.status !== "waiting") {
+    send(ws, "error", { message: "Game has already started" });
     return;
   }
 
-  game!.status = "in_progress";
-  game!.currentQuestion = 0;
+  game.status = "in_progress";
+  game.currentQuestion = 0;
 
-  sendQuestion(game!);
+  sendQuestion(game);
 };
 
 const handleAnswer = (ws: WebSocket, data: AnswerData): void => {
-  const userId = userData.get(ws);
   const game = games.get(data.gameId);
-  game!.playerAnswers.set(userId!, {
+  const userId = userData.get(ws);
+  if (!userId) {
+    send(ws, "error", { message: "Player is not registered" });
+    return;
+  }
+  if (!game) {
+    send(ws, "error", { message: "Game is not found" });
+    return;
+  }
+  if (game.status !== "in_progress") {
+    send(ws, "error", { message: "Game is not in progress" });
+    return;
+  }
+  if (data.questionIndex !== game.currentQuestion) {
+    send(ws, "error", { message: "The question index is wrong" });
+    return;
+  }
+  if (game.playerAnswers.has(userId)) {
+    send(ws, "answer_accepted", { questionIndex: data.questionIndex });
+    return;
+  }
+
+  game.playerAnswers.set(userId, {
     answerIndex: data.answerIndex,
     timestamp: Date.now(),
   });
 
-  const player = game!.players.find((p) => p.index === userId);
+  const player = game.players.find((p) => p.index === userId);
   if (player) {
     player.hasAnswered = true;
   }
 
   send(ws, "answer_accepted", { questionIndex: data.questionIndex });
 
-  const allAnswered = game!.players.every((p) =>
-    game!.playerAnswers.has(p.index),
+  const allAnswered = game.players.every((p) =>
+    game.playerAnswers.has(p.index),
   );
-  if (allAnswered && game!.players.length > 0) {
-    finishQuestion(game!);
+  if (allAnswered && game.players.length > 0) {
+    finishQuestion(game);
   }
 };
 
@@ -334,7 +384,12 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (raw) => {
     let message: WSMessage;
-    message = JSON.parse(raw.toString());
+    try {
+      message = JSON.parse(raw.toString());
+    } catch {
+      send(ws, "error", { message: "Invalid JSON" });
+      return;
+    }
 
     const messageData =
       typeof message.data === "string"
