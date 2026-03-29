@@ -12,11 +12,25 @@ import type {
 } from "./types.js";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-
 const wss = new WebSocketServer({ port: PORT });
 const userData = new Map<WebSocket, string>();
 const users = new Map<string, User>();
 const games = new Map<string, Game>();
+
+const send = (ws: WebSocket, type: string, data: unknown): void => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type, data, id: 0 }));
+  }
+};
+
+const broadcast = (wsList: WebSocket[], type: string, data: unknown): void => {
+  const msg = JSON.stringify({ type, data, id: 0 });
+  for (const ws of wsList) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    }
+  }
+};
 
 let userIdCounter = 1;
 let gameIdCounter = 1;
@@ -37,21 +51,6 @@ const generateUniqueCode = (): string => {
     code = generateCode();
   }
   return code;
-};
-
-const send = (ws: WebSocket, type: string, data: unknown): void => {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type, data, id: 0 }));
-  }
-};
-
-const broadcast = (wsList: WebSocket[], type: string, data: unknown): void => {
-  const msg = JSON.stringify({ type, data, id: 0 });
-  for (const ws of wsList) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
-  }
 };
 
 const getGamePlayers = (game: Game): WebSocket[] => {
@@ -110,6 +109,10 @@ const handleLogin = (ws: WebSocket, data: RegData): void => {
 
 const handleCreateGame = (ws: WebSocket, data: CreateGameData): void => {
   const userId = userData.get(ws);
+  if (!userId) {
+    send(ws, "error", { message: "Player is not registered" });
+    return;
+  }
 
   const gameId = String(gameIdCounter++);
   const code = generateUniqueCode();
@@ -117,7 +120,7 @@ const handleCreateGame = (ws: WebSocket, data: CreateGameData): void => {
   const game: Game = {
     id: gameId,
     code,
-    hostId: userId!,
+    hostId: userId,
     questions: data.questions,
     players: [],
     currentQuestion: -1,
